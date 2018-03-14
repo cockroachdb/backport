@@ -18,7 +18,7 @@ import (
 	"golang.org/x/oauth2"
 )
 
-const usage = `usage: backport [-c <commit>] [-r <release>] <pull-request>...
+const usage = `usage: backport [-f] [-c <commit>] [-r <release>] <pull-request>...
    or: backport [--continue|--abort]`
 
 const helpString = `backport attempts to automatically backport GitHub pull requests to a
@@ -43,6 +43,7 @@ Options:
       --abort              cancel an in-progress backport
   -c, --commit <commit>    only cherry-pick the mentioned commits
   -r, --release <release>  select release to backport to
+  -f, --force              live on the edge
       --help               display this help
 
 Example invocations:
@@ -72,6 +73,8 @@ For help creating a personal access token, see https://goo.gl/Ep2E6x.`)
 	}
 }
 
+var force bool
+
 func run(ctx context.Context) error {
 	var cont, abort, help bool
 	var commits []string
@@ -81,6 +84,7 @@ func run(ctx context.Context) error {
 	pflag.BoolVarP(&help, "help", "h", false, "")
 	pflag.BoolVar(&cont, "continue", false, "")
 	pflag.BoolVar(&abort, "abort", false, "")
+	pflag.BoolVarP(&force, "force", "f", false, "")
 	pflag.StringArrayVarP(&commits, "commit", "c", nil, "")
 	pflag.StringVarP(&release, "release", "r", "", "")
 	pflag.Parse()
@@ -159,7 +163,8 @@ func runBackport(ctx context.Context, prArgs, commitArgs []string, release strin
 	}
 
 	backportBranch := fmt.Sprintf("backport%s-%s", release, strings.Join(prArgs, "-"))
-	err = spawn("git", "checkout", "-B", backportBranch, "FETCH_HEAD")
+	err = spawn("git", "checkout", whenForced("--force", "--no-force"),
+		whenForced("-B", "-b"), backportBranch, "FETCH_HEAD")
 	if err != nil {
 		return errors.Wrapf(err, "creating backport branch %q", backportBranch)
 	}
@@ -255,7 +260,8 @@ func runAbort(ctx context.Context) error {
 }
 
 func finalize(c config, backportBranch, backportURL string) error {
-	err := spawn("git", "push", "--force", c.remote, fmt.Sprintf("%[1]s:%[1]s", backportBranch))
+	err := spawn("git", "push", whenForced("--force", "--no-force"),
+		c.remote, fmt.Sprintf("%[1]s:%[1]s", backportBranch))
 	if err != nil {
 		return errors.Wrap(err, "pushing branch")
 	}
@@ -302,7 +308,7 @@ func checkoutPrevious() error {
 	if !regexp.MustCompile(`^backport\d+`).MatchString(branch) {
 		return nil
 	}
-	err = spawn("git", "checkout", "-")
+	err = spawn("git", "checkout", whenForced("--force", "--no-force"), "-")
 	return errors.Wrap(err, "returning to previous branch")
 }
 
@@ -505,4 +511,11 @@ func (prs pullRequests) message() string {
 type hintedErr struct {
 	hint string
 	error
+}
+
+func whenForced(forced, unforced string) string {
+	if force {
+		return forced
+	}
+	return unforced
 }
