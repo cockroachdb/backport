@@ -477,9 +477,9 @@ func (prs pullRequests) selectedPRs() pullRequests {
 func (prs pullRequests) title(release string) string {
 	prs = prs.selectedPRs()
 	if len(prs) == 1 {
-		return fmt.Sprintf("backport-%s: %s", release, prs[0].title)
+		return fmt.Sprintf("release-%s: %s", release, prs[0].title)
 	}
-	return fmt.Sprintf("backport-%s: TODO", release)
+	return fmt.Sprintf("release-%s: TODO", release)
 }
 
 func (prs pullRequests) message() string {
