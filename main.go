@@ -271,7 +271,10 @@ func finalize(c config, backportBranch, backportURL string) error {
 		return errors.Wrap(err, "removing url file")
 	}
 
-	err = spawn("python", "-m", "webbrowser", backportURL)
+	// The shorthand for opening a web browser with Python, `python -m
+	// webbrowser URL`, does not set the status code appropriately.
+	err = spawn("python", "-c",
+		"import sys, webbrowser; sys.exit(not webbrowser.open(sys.argv[1]))", backportURL)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: unable to launch web browser: %s\n", err)
 		fmt.Fprintf(os.Stderr, "Submit PR manually at:\n    %s\n", backportURL)
