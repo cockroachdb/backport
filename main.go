@@ -49,7 +49,7 @@ Options:
 Example invocations:
 
     $ backport 23437
-    $ backport 23389 23437 -r 1.1 -c 00c6a87 -c a26506b
+    $ backport 23389 23437 -r 1.1 -c 00c6a87 -c a26506b -c '!a32f4ce'
     $ backport --continue
     $ backport --abort`
 
@@ -142,10 +142,8 @@ func runBackport(ctx context.Context, prArgs, commitArgs []string, release strin
 		return err
 	}
 
-	if len(commitArgs) > 0 {
-		if err := pullRequests.selectCommits(commitArgs); err != nil {
-			return err
-		}
+	if err := pullRequests.selectCommits(commitArgs); err != nil {
+		return err
 	}
 
 	if release == "" {
@@ -435,11 +433,23 @@ func loadPullRequests(ctx context.Context, c config, prNos []int) (pullRequests,
 }
 
 func (prs pullRequests) selectCommits(refs []string) error {
-	for i := range prs {
-		prs[i].selectedCommits = nil
+	var includeRefs []string
+	var excludeRefs []string
+	for _, ref := range refs {
+		if strings.HasPrefix(ref, "!") {
+			excludeRefs = append(excludeRefs, ref[1:])
+		} else {
+			includeRefs = append(includeRefs, ref)
+		}
 	}
 
-	for _, ref := range refs {
+	if len(includeRefs) > 0 {
+		for i := range prs {
+			prs[i].selectedCommits = nil
+		}
+	}
+
+	for _, ref := range includeRefs {
 		var found bool
 		for i := range prs {
 			for _, commit := range prs[i].commits {
@@ -456,6 +466,25 @@ func (prs pullRequests) selectCommits(refs []string) error {
 			return errors.Errorf("commit %q was not found in any of the specified PRs", ref)
 		}
 	}
+
+	for _, ref := range excludeRefs {
+		var found bool
+		for i := range prs {
+			for j, commit := range prs[i].selectedCommits {
+				if strings.HasPrefix(commit, ref) {
+					if found {
+						return errors.Errorf("commit ref %q is ambiguous", ref)
+					}
+					prs[i].selectedCommits = append(prs[i].selectedCommits[:j], prs[i].selectedCommits[j+1:]...)
+					found = true
+				}
+			}
+		}
+		if !found {
+			return errors.Errorf("commit %q was not found in any of the specified PRs", ref)
+		}
+	}
+
 	return nil
 }
 
