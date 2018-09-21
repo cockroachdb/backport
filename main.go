@@ -142,6 +142,15 @@ func runBackport(ctx context.Context, prArgs, commitArgs []string, release strin
 		return err
 	}
 
+	if !force {
+		for _, pr := range pullRequests {
+			if pr.baseBranch != "master" {
+				return fmt.Errorf("PR #%d targets %s, not master; are you backporting a backport?",
+					pr.number, pr.baseBranch)
+			}
+		}
+	}
+
 	if err := pullRequests.selectCommits(commitArgs); err != nil {
 		return err
 	}
@@ -408,6 +417,7 @@ type pullRequest struct {
 	body            string
 	commits         []string
 	selectedCommits []string
+	baseBranch      string
 }
 
 type pullRequests []pullRequest
@@ -424,9 +434,10 @@ func loadPullRequests(ctx context.Context, c config, prNos []int) (pullRequests,
 			return nil, errors.Wrapf(err, "fetching commits from PR #%d", prNo)
 		}
 		pr := pullRequest{
-			number: prNo,
-			title:  ghPR.GetTitle(),
-			body:   ghPR.GetBody(),
+			number:     prNo,
+			title:      ghPR.GetTitle(),
+			body:       ghPR.GetBody(),
+			baseBranch: ghPR.GetBase().GetRef(),
 		}
 		for _, c := range commits {
 			pr.commits = append(pr.commits, c.GetSHA())
