@@ -154,10 +154,15 @@ func runBackport(ctx context.Context, prArgs, commitArgs []string, release strin
 	}
 
 	releaseBranch := "release-" + release
-	err = spawn("git", "fetch", "https://github.com/cockroachdb/cockroach.git",
-		"refs/heads/"+releaseBranch)
-	if err != nil {
-		return errors.Wrapf(err, "fetching %q branch", releaseBranch)
+
+	// Order is important here. releaseBranch is fetched last so that we can
+	// check it out below using FETCH_HEAD.
+	for _, branch := range []string{"master", releaseBranch} {
+		err = spawn("git", "fetch", "https://github.com/cockroachdb/cockroach.git",
+			"refs/heads/"+branch)
+		if err != nil {
+			return errors.Wrapf(err, "fetching %q branch", branch)
+		}
 	}
 
 	backportBranch := fmt.Sprintf("backport%s-%s", release, strings.Join(prArgs, "-"))
