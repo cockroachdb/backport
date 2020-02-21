@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"net/http"
@@ -12,8 +13,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/google/go-github/github"
-	"github.com/pkg/errors"
+	"github.com/google/go-github/v29/github"
 	"github.com/spf13/pflag"
 	"golang.org/x/oauth2"
 )
@@ -57,16 +57,15 @@ func main() {
 	if err := run(context.Background()); err != nil {
 		fmt.Fprintf(os.Stderr, "fatal: %s\n", err)
 
-		cause := errors.Cause(err)
-		if _, ok := cause.(*github.RateLimitError); ok {
+		if errors.As(err, new(*github.RateLimitError)) {
 			fmt.Fprintln(os.Stderr, `hint: unauthenticated GitHub requests are subject to a very strict rate
 limit. Please configure backport with a personal access token:
 
 			$ git config cockroach.githubToken TOKEN
 
 For help creating a personal access token, see https://goo.gl/Ep2E6x.`)
-		} else if err, ok := cause.(hintedErr); ok {
-			fmt.Fprintf(os.Stderr, "hint: %s\n", err.hint)
+		} else if e := (hintedErr{}); errors.As(err, &e) {
+			fmt.Fprintf(os.Stderr, "hint: %s\n", e.hint)
 		}
 
 		os.Exit(1)
@@ -121,7 +120,7 @@ func runBackport(ctx context.Context, prArgs, commitArgs []string, release strin
 	for _, prArg := range prArgs {
 		prNo, err := strconv.Atoi(prArg)
 		if err != nil {
-			return errors.Errorf("%q is not a valid pull request number", prArg)
+			return fmt.Errorf("%q is not a valid pull request number", prArg)
 		}
 		prNos = append(prNos, prNo)
 	}
@@ -170,7 +169,7 @@ func runBackport(ctx context.Context, prArgs, commitArgs []string, release strin
 		err = spawn("git", "fetch", "https://github.com/cockroachdb/cockroach.git",
 			"refs/heads/"+branch)
 		if err != nil {
-			return errors.Wrapf(err, "fetching %q branch", branch)
+			return fmt.Errorf("fetching %q branch: %w", branch, err)
 		}
 	}
 
@@ -178,7 +177,7 @@ func runBackport(ctx context.Context, prArgs, commitArgs []string, release strin
 	err = spawn("git", "checkout", whenForced("--force", "--no-force"),
 		whenForced("-B", "-b"), backportBranch, "FETCH_HEAD")
 	if err != nil {
-		return errors.Wrapf(err, "creating backport branch %q", backportBranch)
+		return fmt.Errorf("creating backport branch %q: %w", backportBranch, err)
 	}
 
 	query := url.Values{}
@@ -190,7 +189,7 @@ func runBackport(ctx context.Context, prArgs, commitArgs []string, release strin
 
 	err = ioutil.WriteFile(c.urlFile(), []byte(backportURL), 0644)
 	if err != nil {
-		return errors.Wrap(err, "writing url file")
+		return fmt.Errorf("writing url file: %w", err)
 	}
 
 	err = spawn(append([]string{"git", "cherry-pick"}, pullRequests.selectedCommits()...)...)
@@ -229,13 +228,13 @@ func runContinue(ctx context.Context) error {
 
 	in, err := ioutil.ReadFile(c.urlFile())
 	if err != nil {
-		return errors.Wrap(err, "reading url file")
+		return fmt.Errorf("reading url file: %w", err)
 	}
 	backportURL := string(in)
 
 	matches := regexp.MustCompile(`:(backport.*)\?`).FindStringSubmatch(backportURL)
 	if len(matches) == 0 {
-		return errors.Errorf("malformatted url file: %s", backportURL)
+		return fmt.Errorf("malformatted url file: %s", backportURL)
 	}
 	backportBranch := matches[1]
 
@@ -256,7 +255,7 @@ func runAbort(ctx context.Context) error {
 
 	err = os.Remove(c.urlFile())
 	if err != nil {
-		return errors.Wrap(err, "removing url file")
+		return fmt.Errorf("removing url file: %w", err)
 	}
 
 	if ok, err := isCherryPicking(c); err != nil {
@@ -275,12 +274,12 @@ func finalize(c config, backportBranch, backportURL string) error {
 	err := spawn("git", "push", whenForced("--force", "--no-force"),
 		c.remote, fmt.Sprintf("%[1]s:%[1]s", backportBranch))
 	if err != nil {
-		return errors.Wrap(err, "pushing branch")
+		return fmt.Errorf("pushing branch: %w", err)
 	}
 
 	err = os.Remove(c.urlFile())
 	if err != nil {
-		return errors.Wrap(err, "removing url file")
+		return fmt.Errorf("removing url file: %w", err)
 	}
 
 	// The shorthand for opening a web browser with Python, `python -m
@@ -300,7 +299,7 @@ func isCherryPicking(c config) (bool, error) {
 	if err == nil {
 		return true, nil
 	} else if !os.IsNotExist(err) {
-		return false, errors.Wrap(err, "checking for in-progress cherry-pick")
+		return false, fmt.Errorf("checking for in-progress cherry-pick: %w", err)
 	}
 	return false, nil
 }
@@ -310,7 +309,7 @@ func isBackporting(c config) (bool, error) {
 	if err == nil {
 		return true, nil
 	} else if !os.IsNotExist(err) {
-		return false, errors.Wrap(err, "checking for in-progress backport")
+		return false, fmt.Errorf("checking for in-progress backport: %w", err)
 	}
 	return false, nil
 }
@@ -318,13 +317,15 @@ func isBackporting(c config) (bool, error) {
 func checkoutPrevious() error {
 	branch, err := capture("git", "rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil {
-		return errors.Wrap(err, "looking up current branch name")
+		return fmt.Errorf("looking up current branch name: %w", err)
 	}
 	if !regexp.MustCompile(`^backport\d+`).MatchString(branch) {
 		return nil
 	}
-	err = spawn("git", "checkout", whenForced("--force", "--no-force"), "-")
-	return errors.Wrap(err, "returning to previous branch")
+	if err := spawn("git", "checkout", whenForced("--force", "--no-force"), "-"); err != nil {
+		return fmt.Errorf("returning to previous branch: %w", err)
+	}
+	return nil
 }
 
 type config struct {
@@ -353,14 +354,14 @@ backports to. For example:
 	// Determine username.
 	remoteURL, err := capture("git", "remote", "get-url", "--push", c.remote)
 	if err != nil {
-		return c, errors.Wrapf(err, "determining URL for remote %q", c.remote)
+		return c, fmt.Errorf("determining URL for remote %q: %w", c.remote, err)
 	}
 	m := regexp.MustCompile(`github.com(:|/)([[:alnum:]\-]+)`).FindStringSubmatch(remoteURL)
 	if len(m) != 3 {
-		return c, errors.Errorf("unable to guess GitHub username from remote %q (%s)",
+		return c, fmt.Errorf("unable to guess GitHub username from remote %q (%s)",
 			c.remote, remoteURL)
 	} else if m[2] == "cockroachdb" {
-		return c, errors.Errorf("refusing to use unforked remote %q (%s)",
+		return c, fmt.Errorf("refusing to use unforked remote %q (%s)",
 			c.remote, remoteURL)
 	}
 	c.username = m[2]
@@ -376,7 +377,11 @@ backports to. For example:
 
 	// Determine Git directory.
 	c.gitDir, err = capture("git", "rev-parse", "--git-dir")
-	return c, errors.Wrap(err, "looking up git directory")
+	if err != nil {
+		return c, fmt.Errorf("looking up git directory: %w", err)
+	}
+
+	return c, nil
 }
 
 func (c config) urlFile() string {
@@ -384,12 +389,14 @@ func (c config) urlFile() string {
 }
 
 func getLatestRelease(ctx context.Context, c config) (string, error) {
-	opt := &github.ListOptions{PerPage: 100}
+	opt := &github.BranchListOptions{
+		ListOptions: github.ListOptions{PerPage: 100},
+	}
 	var allBranches []*github.Branch
 	for {
 		branches, res, err := c.ghClient.Repositories.ListBranches(ctx, "cockroachdb", "cockroach", opt)
 		if err != nil {
-			return "", errors.Wrap(err, "discovering release branches")
+			return "", fmt.Errorf("discovering release branches: %w", err)
 		}
 		allBranches = append(allBranches, branches...)
 		if res.NextPage == 0 {
@@ -427,11 +434,11 @@ func loadPullRequests(ctx context.Context, c config, prNos []int) (pullRequests,
 	for _, prNo := range prNos {
 		ghPR, _, err := c.ghClient.PullRequests.Get(ctx, "cockroachdb", "cockroach", prNo)
 		if err != nil {
-			return nil, errors.Wrapf(err, "fetching PR #%d", prNo)
+			return nil, fmt.Errorf("fetching PR #%d: %w", prNo, err)
 		}
 		commits, _, err := c.ghClient.PullRequests.ListCommits(ctx, "cockroachdb", "cockroach", prNo, nil)
 		if err != nil {
-			return nil, errors.Wrapf(err, "fetching commits from PR #%d", prNo)
+			return nil, fmt.Errorf("fetching commits from PR #%d: %w", prNo, err)
 		}
 		pr := pullRequest{
 			number:     prNo,
@@ -471,7 +478,7 @@ func (prs pullRequests) selectCommits(refs []string) error {
 			for _, commit := range prs[i].commits {
 				if strings.HasPrefix(commit, ref) {
 					if found {
-						return errors.Errorf("commit ref %q is ambiguous", ref)
+						return fmt.Errorf("commit ref %q is ambiguous", ref)
 					}
 					prs[i].selectedCommits = append(prs[i].selectedCommits, commit)
 					found = true
@@ -479,7 +486,7 @@ func (prs pullRequests) selectCommits(refs []string) error {
 			}
 		}
 		if !found {
-			return errors.Errorf("commit %q was not found in any of the specified PRs", ref)
+			return fmt.Errorf("commit %q was not found in any of the specified PRs", ref)
 		}
 	}
 
@@ -489,7 +496,7 @@ func (prs pullRequests) selectCommits(refs []string) error {
 			for j, commit := range prs[i].selectedCommits {
 				if strings.HasPrefix(commit, ref) {
 					if found {
-						return errors.Errorf("commit ref %q is ambiguous", ref)
+						return fmt.Errorf("commit ref %q is ambiguous", ref)
 					}
 					prs[i].selectedCommits = append(prs[i].selectedCommits[:j], prs[i].selectedCommits[j+1:]...)
 					found = true
@@ -497,7 +504,7 @@ func (prs pullRequests) selectCommits(refs []string) error {
 			}
 		}
 		if !found {
-			return errors.Errorf("commit %q was not found in any of the specified PRs", ref)
+			return fmt.Errorf("commit %q was not found in any of the specified PRs", ref)
 		}
 	}
 

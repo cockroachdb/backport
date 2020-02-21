@@ -2,10 +2,10 @@ package main
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
-
-	"github.com/pkg/errors"
 )
 
 // capture executes the command specified by args and returns its stdout. If
@@ -22,8 +22,9 @@ func capture(args ...string) (string, error) {
 	}
 	out, err := cmd.Output()
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			err = errors.Errorf("%s: %s", err, exitErr.Stderr)
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			err = fmt.Errorf("%w: %s", err, exitErr.Stderr)
 		}
 		return "", err
 	}
