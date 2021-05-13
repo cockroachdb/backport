@@ -271,7 +271,7 @@ func runAbort(ctx context.Context) error {
 }
 
 func finalize(c config, backportBranch, backportURL string) error {
-	err := spawn("git", "push", whenForced("--force", "--no-force"),
+	err := spawn("git", "push", "-u", whenForced("--force", "--no-force"),
 		c.remote, fmt.Sprintf("%[1]s:%[1]s", backportBranch))
 	if err != nil {
 		return fmt.Errorf("pushing branch: %w", err)
