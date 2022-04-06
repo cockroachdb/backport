@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -282,10 +283,7 @@ func finalize(c config, backportBranch, backportURL string) error {
 		return fmt.Errorf("removing url file: %w", err)
 	}
 
-	// The shorthand for opening a web browser with Python, `python -m
-	// webbrowser URL`, does not set the status code appropriately.
-	err = spawn("python", "-c",
-		"import sys, webbrowser; sys.exit(not webbrowser.open(sys.argv[1]))", backportURL)
+	err = spawn(browserCmd(backportURL)...)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: unable to launch web browser: %s\n", err)
 		fmt.Fprintf(os.Stderr, "Submit PR manually at:\n    %s\n", backportURL)
@@ -573,4 +571,18 @@ func whenForced(forced, unforced string) string {
 		return forced
 	}
 	return unforced
+}
+
+func browserCmd(url string) []string {
+	var cmd []string
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = append(cmd, "/usr/bin/open")
+	case "windows":
+		cmd = append(cmd, "cmd", "/c", "start")
+	default:
+		cmd = append(cmd, "xdg-open")
+	}
+	cmd = append(cmd, url)
+	return cmd
 }
