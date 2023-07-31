@@ -19,7 +19,7 @@ import (
 	"golang.org/x/oauth2"
 )
 
-const usage = `usage: backport [-f] [-c <commit>] [-r <release>] <pull-request>...
+const usage = `usage: backport [-f] [-c <commit>] [-r <release> | -b <branch>] <pull-request>...
    or: backport [--continue|--abort]`
 
 const helpString = `backport attempts to automatically backport GitHub pull requests to a
@@ -40,17 +40,19 @@ running 'git config cockroach.remote REMOTE-NAME'.
 
 Options:
 
-      --continue           resume an in-progress backport
-      --abort              cancel an in-progress backport
-  -c, --commit <commit>    only cherry-pick the mentioned commits
-  -r, --release <release>  select release to backport to
-  -f, --force              live on the edge
-      --help               display this help
+       --continue           resume an in-progress backport
+       --abort              cancel an in-progress backport
+  -c,  --commit <commit>    only cherry-pick the mentioned commits
+  -r,  --release <release>  select release to backport to
+  -b,  --branch <branch>    select the branch to backport to
+  -f,  --force              live on the edge
+       --help               display this help
 
 Example invocations:
 
     $ backport 23437
     $ backport 23389 23437 -r 1.1 -c 00c6a87 -c a26506b -c '!a32f4ce'
+    $ backport 23437 -b release-23.1.10-rc  # backport to the 'release-23.1.10-rc' branch
     $ backport --continue
     $ backport --abort`
 
@@ -79,6 +81,7 @@ func run(ctx context.Context) error {
 	var cont, abort, help bool
 	var commits []string
 	var release string
+	var branch string
 
 	pflag.Usage = func() { fmt.Fprintln(os.Stderr, usage) }
 	pflag.BoolVarP(&help, "help", "h", false, "")
@@ -87,10 +90,12 @@ func run(ctx context.Context) error {
 	pflag.BoolVarP(&force, "force", "f", false, "")
 	pflag.StringArrayVarP(&commits, "commit", "c", nil, "")
 	pflag.StringVarP(&release, "release", "r", "", "")
+	pflag.StringVarP(&branch, "branch", "b", "", "")
 	pflag.Parse()
 
 	if help {
-		return runHelp(ctx)
+		printHelp()
+		return nil
 	}
 
 	if (cont || abort) && len(os.Args) != 2 {
@@ -102,19 +107,23 @@ func run(ctx context.Context) error {
 	} else if abort {
 		return runAbort(ctx)
 	}
-	return runBackport(ctx, pflag.Args(), commits, release)
+	return runBackport(ctx, pflag.Args(), commits, release, branch)
 }
 
-func runHelp(ctx context.Context) error {
+func printHelp() {
 	fmt.Fprintln(os.Stderr, usage)
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, helpString)
-	return nil
 }
 
-func runBackport(ctx context.Context, prArgs, commitArgs []string, release string) error {
+func runBackport(ctx context.Context, prArgs, commitArgs []string, releaseArg string, branchArg string) error {
 	if len(prArgs) == 0 {
-		return runHelp(ctx)
+		printHelp()
+		return fmt.Errorf("missing arguments")
+	}
+	if releaseArg != "" && branchArg != "" {
+		printHelp()
+		return fmt.Errorf("cannot specify --release and --branch at the same time")
 	}
 
 	var prNos []int
@@ -155,18 +164,11 @@ func runBackport(ctx context.Context, prArgs, commitArgs []string, release strin
 		return err
 	}
 
-	if release == "" {
-		release, err = getLatestRelease(ctx, c)
-		if err != nil {
-			return err
-		}
-	}
-
-	releaseBranch := "release-" + release
+	destBranch := getDestinationBranch(ctx, c, releaseArg, branchArg)
 
 	// Order is important here. releaseBranch is fetched last so that we can
 	// check it out below using FETCH_HEAD.
-	for _, branch := range []string{"master", releaseBranch} {
+	for _, branch := range []string{"master", destBranch.branch} {
 		err = spawn("git", "fetch", "https://github.com/cockroachdb/cockroach.git",
 			"refs/heads/"+branch)
 		if err != nil {
@@ -174,7 +176,7 @@ func runBackport(ctx context.Context, prArgs, commitArgs []string, release strin
 		}
 	}
 
-	backportBranch := fmt.Sprintf("backport%s-%s", release, strings.Join(prArgs, "-"))
+	backportBranch := fmt.Sprintf("backport%s-%s", destBranch.backportBranchSuffix, strings.Join(prArgs, "-"))
 	err = spawn("git", "checkout", whenForced("--force", "--no-force"),
 		whenForced("-B", "-b"), backportBranch, "FETCH_HEAD")
 	if err != nil {
@@ -183,10 +185,10 @@ func runBackport(ctx context.Context, prArgs, commitArgs []string, release strin
 
 	query := url.Values{}
 	query.Add("expand", "1")
-	query.Add("title", pullRequests.title(release))
+	query.Add("title", pullRequests.title(destBranch))
 	query.Add("body", pullRequests.message())
 	backportURL := fmt.Sprintf("https://github.com/cockroachdb/cockroach/compare/%s...%s:%s?%s",
-		releaseBranch, c.username, backportBranch, query.Encode())
+		destBranch.branch, c.username, backportBranch, query.Encode())
 
 	err = ioutil.WriteFile(c.urlFile(), []byte(backportURL), 0644)
 	if err != nil {
@@ -416,6 +418,31 @@ func getLatestRelease(ctx context.Context, c config) (string, error) {
 	return lastRelease, nil
 }
 
+type destinationBranch struct {
+	branch               string // either `release-{major-series}` or `{branch}`, derived from command-line parameter
+	backportBranchSuffix string // suffix to add to the backport branch, derived from the source branch
+}
+
+func getDestinationBranch(ctx context.Context, c config, releaseArg string, branchArg string) *destinationBranch {
+	if branchArg != "" {
+		return &destinationBranch{
+			branch:               branchArg,
+			backportBranchSuffix: branchArg,
+		}
+	}
+	var err error
+	if releaseArg == "" {
+		releaseArg, err = getLatestRelease(ctx, c)
+		if err == nil {
+			return nil
+		}
+	}
+	return &destinationBranch{
+		branch:               "release-" + releaseArg,
+		backportBranchSuffix: releaseArg,
+	}
+}
+
 type pullRequest struct {
 	number          int
 	title           string
@@ -527,12 +554,12 @@ func (prs pullRequests) selectedPRs() pullRequests {
 	return selectedPRs
 }
 
-func (prs pullRequests) title(release string) string {
+func (prs pullRequests) title(destBranch *destinationBranch) string {
 	prs = prs.selectedPRs()
 	if len(prs) == 1 {
-		return fmt.Sprintf("release-%s: %s", release, prs[0].title)
+		return fmt.Sprintf("%s: %s", destBranch.branch, prs[0].title)
 	}
-	return fmt.Sprintf("release-%s: TODO", release)
+	return fmt.Sprintf("%s: TODO", destBranch.branch)
 }
 
 func (prs pullRequests) message() string {
