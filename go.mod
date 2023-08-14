@@ -1,4 +1,4 @@
-module github.com/benesch/backport
+module github.com/cockroachdb/backport
 
 go 1.13
 
