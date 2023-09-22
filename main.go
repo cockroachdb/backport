@@ -433,8 +433,8 @@ func getDestinationBranch(ctx context.Context, c config, releaseArg string, bran
 	var err error
 	if releaseArg == "" {
 		releaseArg, err = getLatestRelease(ctx, c)
-		if err == nil {
-			return nil
+		if err != nil {
+			panic(err)
 		}
 	}
 	return &destinationBranch{
