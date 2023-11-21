@@ -10,7 +10,7 @@ backport expects to be run from within a CockroachDB clone.
 
 ```
 $ backport --help
-usage: backport [-c <commit>] [-r <release>] <pull-request>...
+usage: backport [-f] [-c <commit>] [-r <release> | -b <branch>] <pull-request>...
    or: backport [--continue|--abort]
 
 backport attempts to automatically backport GitHub pull requests to a
@@ -31,16 +31,19 @@ running 'git config cockroach.remote REMOTE-NAME'.
 
 Options:
 
-      --continue           resume an in-progress backport
-      --abort              cancel an in-progress backport
-  -c, --commit <commit>    only cherry-pick the mentioned commits
-  -r, --release <release>  select release to backport to
-      --help               display this help
+       --continue           resume an in-progress backport
+       --abort              cancel an in-progress backport
+  -c,  --commit <commit>    only cherry-pick the mentioned commits
+  -r,  --release <release>  select release to backport to
+  -b,  --branch <branch>    select the branch to backport to
+  -f,  --force              live on the edge
+       --help               display this help
 
 Example invocations:
 
     $ backport 23437
-    $ backport 23389 23437 -r 1.1 -c 00c6a87 -c a26506b
+    $ backport 23389 23437 -r 1.1 -c 00c6a87 -c a26506b -c '!a32f4ce'
+    $ backport 23437 -b release-23.1.10-rc  # backport to the 'release-23.1.10-rc' branch
     $ backport --continue
     $ backport --abort
 ```
