@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"net/http"
 	"net/url"
 	"os"
@@ -19,7 +18,7 @@ import (
 	"golang.org/x/oauth2"
 )
 
-const usage = `usage: backport [-f] [-c <commit>] [-r <release> | -b <branch>] <pull-request>...
+const usage = `usage: backport [-f] [-c <commit>] [-r <release> | -b <branch> | -j <release-justification>] <pull-request>...
    or: backport [--continue|--abort]`
 
 const helpString = `backport attempts to automatically backport GitHub pull requests to a
@@ -40,17 +39,19 @@ running 'git config cockroach.remote REMOTE-NAME'.
 
 Options:
 
-       --continue           resume an in-progress backport
-       --abort              cancel an in-progress backport
-  -c,  --commit <commit>    only cherry-pick the mentioned commits
-  -r,  --release <release>  select release to backport to
-  -b,  --branch <branch>    select the branch to backport to
-  -f,  --force              live on the edge
-       --help               display this help
+       --continue               resume an in-progress backport
+       --abort                  cancel an in-progress backport
+  -c,  --commit <commit>        only cherry-pick the mentioned commits
+  -r,  --release <release>      select release to backport to
+  -b,  --branch <branch>        select the branch to backport to
+  -j,  --release-justification  justification for this backport
+  -f,  --force                  live on the edge
+       --help                   display this help
 
 Example invocations:
 
     $ backport 23437
+    $ backport 23437 -j "test-only changes"
     $ backport 23389 23437 -r 1.1 -c 00c6a87 -c a26506b -c '!a32f4ce'
     $ backport 23437 -b release-23.1.10-rc  # backport to the 'release-23.1.10-rc' branch
     $ backport --continue
@@ -82,6 +83,7 @@ func run(ctx context.Context) error {
 	var commits []string
 	var release string
 	var branch string
+	var releaseJustification string
 
 	pflag.Usage = func() { fmt.Fprintln(os.Stderr, usage) }
 	pflag.BoolVarP(&help, "help", "h", false, "")
@@ -91,6 +93,7 @@ func run(ctx context.Context) error {
 	pflag.StringArrayVarP(&commits, "commit", "c", nil, "")
 	pflag.StringVarP(&release, "release", "r", "", "")
 	pflag.StringVarP(&branch, "branch", "b", "", "")
+	pflag.StringVarP(&releaseJustification, "release-justification", "j", "", "justification for this release")
 	pflag.Parse()
 
 	if help {
@@ -107,7 +110,7 @@ func run(ctx context.Context) error {
 	} else if abort {
 		return runAbort(ctx)
 	}
-	return runBackport(ctx, pflag.Args(), commits, release, branch)
+	return runBackport(ctx, pflag.Args(), commits, release, branch, releaseJustification)
 }
 
 func printHelp() {
@@ -116,7 +119,7 @@ func printHelp() {
 	fmt.Fprintln(os.Stderr, helpString)
 }
 
-func runBackport(ctx context.Context, prArgs, commitArgs []string, releaseArg string, branchArg string) error {
+func runBackport(ctx context.Context, prArgs, commitArgs []string, releaseArg string, branchArg string, releaseJustification string) error {
 	if len(prArgs) == 0 {
 		printHelp()
 		return fmt.Errorf("missing arguments")
@@ -186,11 +189,11 @@ func runBackport(ctx context.Context, prArgs, commitArgs []string, releaseArg st
 	query := url.Values{}
 	query.Add("expand", "1")
 	query.Add("title", pullRequests.title(destBranch))
-	query.Add("body", pullRequests.message())
+	query.Add("body", pullRequests.message(releaseJustification))
 	backportURL := fmt.Sprintf("https://github.com/cockroachdb/cockroach/compare/%s...%s:%s?%s",
 		destBranch.branch, c.username, backportBranch, query.Encode())
 
-	err = ioutil.WriteFile(c.urlFile(), []byte(backportURL), 0644)
+	err = os.WriteFile(c.urlFile(), []byte(backportURL), 0644)
 	if err != nil {
 		return fmt.Errorf("writing url file: %w", err)
 	}
@@ -229,7 +232,7 @@ func runContinue(ctx context.Context) error {
 		}
 	}
 
-	in, err := ioutil.ReadFile(c.urlFile())
+	in, err := os.ReadFile(c.urlFile())
 	if err != nil {
 		return fmt.Errorf("reading url file: %w", err)
 	}
@@ -562,7 +565,7 @@ func (prs pullRequests) title(destBranch *destinationBranch) string {
 	return fmt.Sprintf("%s: TODO", destBranch.branch)
 }
 
-func (prs pullRequests) message() string {
+func (prs pullRequests) message(releaseJustification string) string {
 	prs = prs.selectedPRs()
 	var s strings.Builder
 	if len(prs) == 1 {
@@ -585,6 +588,8 @@ func (prs pullRequests) message() string {
 		fmt.Fprintln(&s)
 		fmt.Fprintln(&s, prs[0].body)
 	}
+	fmt.Fprintln(&s)
+	fmt.Fprintf(&s, "Release justification: %s\n", releaseJustification)
 	return s.String()
 }
 
