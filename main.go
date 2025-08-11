@@ -63,11 +63,9 @@ func main() {
 
 		if errors.As(err, new(*github.RateLimitError)) {
 			fmt.Fprintln(os.Stderr, `hint: unauthenticated GitHub requests are subject to a very strict rate
-limit. Please configure backport with a personal access token:
+limit. Please authenticate with the GitHub CLI:
 
-			$ git config cockroach.githubToken TOKEN
-
-For help creating a personal access token, see https://goo.gl/Ep2E6x.`)
+			$ gh auth login`)
 		} else if e := (hintedErr{}); errors.As(err, &e) {
 			fmt.Fprintf(os.Stderr, "hint: %s\n", e.hint)
 		}
@@ -119,7 +117,13 @@ func printHelp() {
 	fmt.Fprintln(os.Stderr, helpString)
 }
 
-func runBackport(ctx context.Context, prArgs, commitArgs []string, releaseArg string, branchArg string, releaseJustification string) error {
+func runBackport(
+	ctx context.Context,
+	prArgs, commitArgs []string,
+	releaseArg string,
+	branchArg string,
+	releaseJustification string,
+) error {
 	if len(prArgs) == 0 {
 		printHelp()
 		return fmt.Errorf("missing arguments")
@@ -193,7 +197,7 @@ func runBackport(ctx context.Context, prArgs, commitArgs []string, releaseArg st
 	backportURL := fmt.Sprintf("https://github.com/cockroachdb/cockroach/compare/%s...%s:%s?%s",
 		destBranch.branch, c.username, backportBranch, query.Encode())
 
-	err = os.WriteFile(c.urlFile(), []byte(backportURL), 0644)
+	err = os.WriteFile(c.urlFile(), []byte(backportURL), 0o644)
 	if err != nil {
 		return fmt.Errorf("writing url file: %w", err)
 	}
@@ -369,10 +373,29 @@ backports to. For example:
 	}
 	c.username = m[2]
 
-	// Build GitHub client.
+	// Warn if legacy token is configured in git config.
+	if legacyToken, _ := capture("git", "config", "--get", "cockroach.githubToken"); legacyToken != "" {
+		fmt.Fprintln(os.Stderr, "warning: found legacy 'cockroach.githubToken' in git config; consider removing it with:\n  git config --unset cockroach.githubToken\n  # if set globally: git config --global --unset cockroach.githubToken")
+	}
+
+	// Build GitHub client using GitHub CLI authentication.
 	var ghAuthClient *http.Client
-	ghToken, _ := capture("git", "config", "--get", "cockroach.githubToken")
-	if ghToken != "" {
+	// Ensure GitHub CLI is installed.
+	if _, err := capture("gh", "--version"); err != nil {
+		return c, hintedErr{
+			error: fmt.Errorf("GitHub CLI not found: %w", err),
+			hint:  "install GitHub CLI from https://cli.github.com/ and run 'gh auth login'",
+		}
+	}
+	// Ensure GitHub CLI is authenticated.
+	if _, err := capture("gh", "auth", "status"); err != nil {
+		return c, hintedErr{
+			error: fmt.Errorf("GitHub CLI is not authenticated: %w", err),
+			hint:  "run 'gh auth login' to authenticate",
+		}
+	}
+	// Obtain token via gh.
+	if ghToken, err := capture("gh", "auth", "token"); err == nil && ghToken != "" {
 		ghAuthClient = oauth2.NewClient(ctx, oauth2.StaticTokenSource(
 			&oauth2.Token{AccessToken: ghToken}))
 	}
@@ -426,7 +449,9 @@ type destinationBranch struct {
 	backportBranchSuffix string // suffix to add to the backport branch, derived from the source branch
 }
 
-func getDestinationBranch(ctx context.Context, c config, releaseArg string, branchArg string) *destinationBranch {
+func getDestinationBranch(
+	ctx context.Context, c config, releaseArg string, branchArg string,
+) *destinationBranch {
 	if branchArg != "" {
 		return &destinationBranch{
 			branch:               branchArg,
