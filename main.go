@@ -161,8 +161,11 @@ func runBackport(
 	if !force {
 		for _, pr := range pullRequests {
 			if pr.baseBranch != "master" {
-				return fmt.Errorf("PR #%d targets %s, not master; are you backporting a backport?",
-					pr.number, pr.baseBranch)
+				return fmt.Errorf(
+					"PR #%d targets %s, not master. If backporting a backport is intentional"+
+					", re-run with --force.",
+					pr.number, pr.baseBranch,
+				)
 			}
 		}
 	}
