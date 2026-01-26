@@ -13,7 +13,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/google/go-github/v29/github"
+	"github.com/google/go-github/v82/github"
 	"github.com/spf13/pflag"
 	"golang.org/x/oauth2"
 )
@@ -163,7 +163,7 @@ func runBackport(
 			if pr.baseBranch != "master" {
 				return fmt.Errorf(
 					"PR #%d targets %s, not master. If backporting a backport is intentional"+
-					", re-run with --force.",
+						", re-run with --force.",
 					pr.number, pr.baseBranch,
 				)
 			}
