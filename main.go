@@ -46,6 +46,7 @@ Options:
   -b,  --branch <branch>        select the branch to backport to
   -j,  --release-justification  justification for this backport
   -f,  --force                  live on the edge
+       --no-browser             don't open the browser
        --help                   display this help
 
 Example invocations:
@@ -75,6 +76,7 @@ limit. Please authenticate with the GitHub CLI:
 }
 
 var force bool
+var noBrowser bool
 
 func run(ctx context.Context) error {
 	var cont, abort, help bool
@@ -88,6 +90,7 @@ func run(ctx context.Context) error {
 	pflag.BoolVar(&cont, "continue", false, "")
 	pflag.BoolVar(&abort, "abort", false, "")
 	pflag.BoolVarP(&force, "force", "f", false, "")
+	pflag.BoolVar(&noBrowser, "no-browser", false, "")
 	pflag.StringArrayVarP(&commits, "commit", "c", nil, "")
 	pflag.StringVarP(&release, "release", "r", "", "")
 	pflag.StringVarP(&branch, "branch", "b", "", "")
@@ -295,10 +298,14 @@ func finalize(c config, backportBranch, backportURL string) error {
 		return fmt.Errorf("removing url file: %w", err)
 	}
 
-	err = spawn(browserCmd(backportURL)...)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: unable to launch web browser: %s\n", err)
-		fmt.Fprintf(os.Stderr, "Submit PR manually at:\n    %s\n", backportURL)
+	if noBrowser {
+		fmt.Fprintf(os.Stdout, "Submit PR at:\n    %s\n", backportURL)
+	} else {
+		err = spawn(browserCmd(backportURL)...)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: unable to launch web browser: %s\n", err)
+			fmt.Fprintf(os.Stdout, "Submit PR manually at:\n    %s\n", backportURL)
+		}
 	}
 
 	return checkoutPrevious()
