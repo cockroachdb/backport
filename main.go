@@ -182,7 +182,7 @@ func runBackport(
 	// Order is important here. releaseBranch is fetched last so that we can
 	// check it out below using FETCH_HEAD.
 	for _, branch := range []string{"master", destBranch.branch} {
-		err = spawn("git", "fetch", "https://github.com/cockroachdb/cockroach.git",
+		err = spawn("git", "fetch", c.upstreamFetchTarget(),
 			"refs/heads/"+branch)
 		if err != nil {
 			return fmt.Errorf("fetching %q branch: %w", branch, err)
@@ -200,8 +200,8 @@ func runBackport(
 	query.Add("expand", "1")
 	query.Add("title", pullRequests.title(destBranch))
 	query.Add("body", pullRequests.message(releaseJustification))
-	backportURL := fmt.Sprintf("https://github.com/cockroachdb/cockroach/compare/%s...%s:%s?%s",
-		destBranch.branch, c.username, backportBranch, query.Encode())
+	backportURL := fmt.Sprintf("https://github.com/%s/%s/compare/%s...%s:%s?%s",
+		c.upstreamOwner, c.upstreamRepo, destBranch.branch, c.username, backportBranch, query.Encode())
 
 	err = os.WriteFile(c.urlFile(), []byte(backportURL), 0o644)
 	if err != nil {
@@ -346,10 +346,14 @@ func checkoutPrevious() error {
 }
 
 type config struct {
-	ghClient *github.Client
-	remote   string
-	username string
-	gitDir   string
+	ghClient       *github.Client
+	remote         string
+	username       string
+	repoName       string
+	upstreamOwner  string
+	upstreamRepo   string
+	upstreamRemote string
+	gitDir         string
 }
 
 func loadConfig(ctx context.Context) (config, error) {
@@ -368,20 +372,18 @@ backports to. For example:
 		}
 	}
 
-	// Determine username.
+	// Determine username and repo name from remote URL.
 	remoteURL, err := capture("git", "remote", "get-url", "--push", c.remote)
 	if err != nil {
 		return c, fmt.Errorf("determining URL for remote %q: %w", c.remote, err)
 	}
-	m := regexp.MustCompile(`github.com(:|/)([[:alnum:]\-]+)`).FindStringSubmatch(remoteURL)
-	if len(m) != 3 {
-		return c, fmt.Errorf("unable to guess GitHub username from remote %q (%s)",
-			c.remote, remoteURL)
-	} else if m[2] == "cockroachdb" {
-		return c, fmt.Errorf("refusing to use unforked remote %q (%s)",
-			c.remote, remoteURL)
+	remoteOwner, repoName, err := parseGitHubRemote(remoteURL)
+	if err != nil {
+		return c, fmt.Errorf("unable to parse GitHub owner/repo from remote %q (%s): %w",
+			c.remote, remoteURL, err)
 	}
-	c.username = m[2]
+	c.username = remoteOwner
+	c.repoName = repoName
 
 	// Warn if legacy token is configured in git config.
 	if legacyToken, _ := capture("git", "config", "--get", "cockroach.githubToken"); legacyToken != "" {
@@ -411,6 +413,26 @@ backports to. For example:
 	}
 	c.ghClient = github.NewClient(ghAuthClient)
 
+	// Resolve upstream repository via GitHub fork parent.
+	forkRepo, _, err := c.ghClient.Repositories.Get(ctx, c.username, c.repoName)
+	if err != nil {
+		return c, fmt.Errorf("looking up repository %s/%s: %w", c.username, c.repoName, err)
+	}
+	parent := forkRepo.GetParent()
+	if parent == nil {
+		return c, fmt.Errorf("repository %s/%s is not a fork; cockroach.remote must point to a fork", c.username, c.repoName)
+	}
+	c.upstreamOwner = parent.GetOwner().GetLogin()
+	c.upstreamRepo = parent.GetName()
+
+	// Verify the remote is a fork, not the upstream itself.
+	if remoteOwner == c.upstreamOwner && c.repoName == c.upstreamRepo {
+		return c, fmt.Errorf("refusing to use unforked remote %q (%s)", c.remote, remoteURL)
+	}
+
+	// Find a named remote pointing to the upstream repo.
+	c.upstreamRemote, _ = findUpstreamRemote(c.upstreamOwner, c.upstreamRepo)
+
 	// Determine Git directory.
 	c.gitDir, err = capture("git", "rev-parse", "--git-dir")
 	if err != nil {
@@ -424,13 +446,64 @@ func (c config) urlFile() string {
 	return filepath.Join(c.gitDir, "BACKPORT_URL")
 }
 
+func (c config) upstreamFetchTarget() string {
+	if c.upstreamRemote != "" {
+		return c.upstreamRemote
+	}
+	return fmt.Sprintf("https://github.com/%s/%s.git", c.upstreamOwner, c.upstreamRepo)
+}
+
+func findUpstreamRemote(upstreamOwner, upstreamRepo string) (string, error) {
+	output, err := capture("git", "remote")
+	if err != nil {
+		return "", err
+	}
+	for _, name := range strings.Split(output, "\n") {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		url, err := capture("git", "remote", "get-url", name)
+		if err != nil {
+			continue
+		}
+		owner, repo, err := parseGitHubRemote(url)
+		if err != nil {
+			continue
+		}
+		if owner == upstreamOwner && repo == upstreamRepo {
+			return name, nil
+		}
+	}
+	return "", fmt.Errorf("no remote found for %s/%s", upstreamOwner, upstreamRepo)
+}
+
+func parseGitHubRemote(remoteURL string) (owner, repo string, err error) {
+	// Normalize SCP-style URLs (git@github.com:owner/repo) to standard URL form.
+	normalized := strings.Replace(remoteURL, "git@github.com:", "https://github.com/", 1)
+	u, parseErr := url.Parse(strings.TrimSpace(normalized))
+	if parseErr != nil || u.Host != "github.com" {
+		return "", "", fmt.Errorf("not a GitHub URL")
+	}
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	if len(parts) < 2 {
+		return "", "", fmt.Errorf("expected owner/repo in path")
+	}
+	owner = parts[0]
+	repo = strings.TrimSuffix(parts[1], ".git")
+	if owner == "" || repo == "" {
+		return "", "", fmt.Errorf("empty owner or repo")
+	}
+	return owner, repo, nil
+}
+
 func getLatestRelease(ctx context.Context, c config) (string, error) {
 	opt := &github.BranchListOptions{
 		ListOptions: github.ListOptions{PerPage: 100},
 	}
 	var allBranches []*github.Branch
 	for {
-		branches, res, err := c.ghClient.Repositories.ListBranches(ctx, "cockroachdb", "cockroach", opt)
+		branches, res, err := c.ghClient.Repositories.ListBranches(ctx, c.upstreamOwner, c.upstreamRepo, opt)
 		if err != nil {
 			return "", fmt.Errorf("discovering release branches: %w", err)
 		}
@@ -495,11 +568,11 @@ type pullRequests []pullRequest
 func loadPullRequests(ctx context.Context, c config, prNos []int) (pullRequests, error) {
 	var prs pullRequests
 	for _, prNo := range prNos {
-		ghPR, _, err := c.ghClient.PullRequests.Get(ctx, "cockroachdb", "cockroach", prNo)
+		ghPR, _, err := c.ghClient.PullRequests.Get(ctx, c.upstreamOwner, c.upstreamRepo, prNo)
 		if err != nil {
 			return nil, fmt.Errorf("fetching PR #%d: %w", prNo, err)
 		}
-		commits, _, err := c.ghClient.PullRequests.ListCommits(ctx, "cockroachdb", "cockroach", prNo, nil)
+		commits, _, err := c.ghClient.PullRequests.ListCommits(ctx, c.upstreamOwner, c.upstreamRepo, prNo, nil)
 		if err != nil {
 			return nil, fmt.Errorf("fetching commits from PR #%d: %w", prNo, err)
 		}

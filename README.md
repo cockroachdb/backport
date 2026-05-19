@@ -1,12 +1,12 @@
 # backport
 
-backport automatically backports GitHub pull requests to a release branch.  It
-is currently hardcoded for use with [cockroachdb/cockroach], but it might
-eventually learn to work with other repositories.
+backport automatically backports GitHub pull requests to a release branch. It
+auto-detects the upstream repository from your fork's GitHub parent, so it works
+with any fork-based workflow.
 
 ## Usage
 
-backport expects to be run from within a CockroachDB clone.
+backport expects to be run from within a Git clone of a forked repository.
 
 ```
 $ backport --help
@@ -47,5 +47,3 @@ Example invocations:
     $ backport --continue
     $ backport --abort
 ```
-
-[cockroachdb/cockroach]: https://github.com/cockroachdb/cockroach
