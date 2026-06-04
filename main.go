@@ -47,6 +47,7 @@ Options:
   -j,  --release-justification  justification for this backport
   -f,  --force                  live on the edge
        --no-browser             don't open the browser
+       --source-repo <owner/repo>  fetch PR metadata from a different repo
        --help                   display this help
 
 Example invocations:
@@ -55,6 +56,7 @@ Example invocations:
     $ backport 23437 -j "test-only changes"
     $ backport 23389 23437 -r 1.1 -c 00c6a87 -c a26506b -c '!a32f4ce'
     $ backport 23437 -b release-23.1.10-rc  # backport to the 'release-23.1.10-rc' branch
+    $ backport 12345 -b release-25.1 --source-repo cockroachdb/cockroach
     $ backport --continue
     $ backport --abort`
 
@@ -84,6 +86,7 @@ func run(ctx context.Context) error {
 	var release string
 	var branch string
 	var releaseJustification string
+	var sourceRepo string
 
 	pflag.Usage = func() { fmt.Fprintln(os.Stderr, usage) }
 	pflag.BoolVarP(&help, "help", "h", false, "")
@@ -95,6 +98,7 @@ func run(ctx context.Context) error {
 	pflag.StringVarP(&release, "release", "r", "", "")
 	pflag.StringVarP(&branch, "branch", "b", "", "")
 	pflag.StringVarP(&releaseJustification, "release-justification", "j", "", "justification for this release")
+	pflag.StringVar(&sourceRepo, "source-repo", "", "")
 	pflag.Parse()
 
 	if help {
@@ -111,7 +115,7 @@ func run(ctx context.Context) error {
 	} else if abort {
 		return runAbort(ctx)
 	}
-	return runBackport(ctx, pflag.Args(), commits, release, branch, releaseJustification)
+	return runBackport(ctx, pflag.Args(), commits, release, branch, releaseJustification, sourceRepo)
 }
 
 func printHelp() {
@@ -126,6 +130,7 @@ func runBackport(
 	releaseArg string,
 	branchArg string,
 	releaseJustification string,
+	sourceRepoArg string,
 ) error {
 	if len(prArgs) == 0 {
 		printHelp()
@@ -134,6 +139,15 @@ func runBackport(
 	if releaseArg != "" && branchArg != "" {
 		printHelp()
 		return fmt.Errorf("cannot specify --release and --branch at the same time")
+	}
+
+	var sourceOwner, sourceRepoName string
+	if sourceRepoArg != "" {
+		parts := strings.SplitN(sourceRepoArg, "/", 2)
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			return fmt.Errorf("--source-repo must be in owner/repo format (e.g. cockroachdb/cockroach)")
+		}
+		sourceOwner, sourceRepoName = parts[0], parts[1]
 	}
 
 	var prNos []int
@@ -156,7 +170,7 @@ func runBackport(
 		return errors.New("backport already in progress")
 	}
 
-	pullRequests, err := loadPullRequests(ctx, c, prNos)
+	pullRequests, err := loadPullRequests(ctx, c, prNos, sourceOwner, sourceRepoName)
 	if err != nil {
 		return err
 	}
@@ -199,7 +213,7 @@ func runBackport(
 	query := url.Values{}
 	query.Add("expand", "1")
 	query.Add("title", pullRequests.title(destBranch))
-	query.Add("body", pullRequests.message(releaseJustification))
+	query.Add("body", pullRequests.message(releaseJustification, sourceRepoArg))
 	backportURL := fmt.Sprintf("https://github.com/%s/%s/compare/%s...%s:%s?%s",
 		c.upstreamOwner, c.upstreamRepo, destBranch.branch, c.username, backportBranch, query.Encode())
 
@@ -565,14 +579,18 @@ type pullRequest struct {
 
 type pullRequests []pullRequest
 
-func loadPullRequests(ctx context.Context, c config, prNos []int) (pullRequests, error) {
+func loadPullRequests(ctx context.Context, c config, prNos []int, sourceOwner, sourceRepo string) (pullRequests, error) {
+	prOwner, prRepo := c.upstreamOwner, c.upstreamRepo
+	if sourceOwner != "" && sourceRepo != "" {
+		prOwner, prRepo = sourceOwner, sourceRepo
+	}
 	var prs pullRequests
 	for _, prNo := range prNos {
-		ghPR, _, err := c.ghClient.PullRequests.Get(ctx, c.upstreamOwner, c.upstreamRepo, prNo)
+		ghPR, _, err := c.ghClient.PullRequests.Get(ctx, prOwner, prRepo, prNo)
 		if err != nil {
 			return nil, fmt.Errorf("fetching PR #%d: %w", prNo, err)
 		}
-		commits, _, err := c.ghClient.PullRequests.ListCommits(ctx, c.upstreamOwner, c.upstreamRepo, prNo, nil)
+		commits, _, err := c.ghClient.PullRequests.ListCommits(ctx, prOwner, prRepo, prNo, nil)
 		if err != nil {
 			return nil, fmt.Errorf("fetching commits from PR #%d: %w", prNo, err)
 		}
@@ -673,17 +691,23 @@ func (prs pullRequests) title(destBranch *destinationBranch) string {
 	return fmt.Sprintf("%s: TODO", destBranch.branch)
 }
 
-func (prs pullRequests) message(releaseJustification string) string {
+func (prs pullRequests) message(releaseJustification string, sourceRepo string) string {
 	prs = prs.selectedPRs()
+	prRef := func(number int) string {
+		if sourceRepo != "" {
+			return fmt.Sprintf("%s#%d", sourceRepo, number)
+		}
+		return fmt.Sprintf("#%d", number)
+	}
 	var s strings.Builder
 	if len(prs) == 1 {
-		fmt.Fprintf(&s, "Backport %d/%d commits from #%d.\n",
-			len(prs[0].selectedCommits), len(prs[0].commits), prs[0].number)
+		fmt.Fprintf(&s, "Backport %d/%d commits from %s.\n",
+			len(prs[0].selectedCommits), len(prs[0].commits), prRef(prs[0].number))
 	} else {
 		fmt.Fprintln(&s, "Backport:")
 		for _, pr := range prs {
-			fmt.Fprintf(&s, "  * %d/%d commits from %q (#%d)\n",
-				len(pr.selectedCommits), len(pr.commits), pr.title, pr.number)
+			fmt.Fprintf(&s, "  * %d/%d commits from %q (%s)\n",
+				len(pr.selectedCommits), len(pr.commits), pr.title, prRef(pr.number))
 		}
 		fmt.Fprintln(&s)
 		fmt.Fprintln(&s, "Please see individual PRs for details.")
