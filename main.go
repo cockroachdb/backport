@@ -432,6 +432,15 @@ backports to. For example:
 
 	// Find a named remote pointing to the upstream repo.
 	c.upstreamRemote, _ = findUpstreamRemote(c.upstreamOwner, c.upstreamRepo)
+	if c.upstreamRemote == "" {
+		return c, hintedErr{
+			error: fmt.Errorf("no git remote found for upstream %s/%s", c.upstreamOwner, c.upstreamRepo),
+			hint: fmt.Sprintf(`add a remote pointing to the upstream repository:
+
+    $ git remote add upstream git@github.com:%s/%s.git
+`, c.upstreamOwner, c.upstreamRepo),
+		}
+	}
 
 	// Determine Git directory.
 	c.gitDir, err = capture("git", "rev-parse", "--git-dir")
@@ -447,10 +456,7 @@ func (c config) urlFile() string {
 }
 
 func (c config) upstreamFetchTarget() string {
-	if c.upstreamRemote != "" {
-		return c.upstreamRemote
-	}
-	return fmt.Sprintf("https://github.com/%s/%s.git", c.upstreamOwner, c.upstreamRepo)
+	return c.upstreamRemote
 }
 
 func findUpstreamRemote(upstreamOwner, upstreamRepo string) (string, error) {
